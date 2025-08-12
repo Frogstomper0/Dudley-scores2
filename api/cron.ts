@@ -1,16 +1,14 @@
-/**
- * /api/cron – refresh endpoint hit by Vercel Cron (and you can call it manually).
- * - Tries to refresh the cache (scrape if BROWSERLESS_WS present; else fallback).
- */
-import { refreshGamesJson } from "../lib/data.js";
+import { refreshGamesJson } from "../lib/data";
 
-export default async function handler(req, res) {
+export default async function handler(request: Request): Promise<Response> {
   try {
     const { data, source } = await refreshGamesJson();
-    res.setHeader("content-type", "application/json");
-    res.status(200).send(JSON.stringify({ ok: true, source, updated: data.updated }, null, 2));
+    return new Response(JSON.stringify({ ok: true, source, updated: data.updated }, null, 2), {
+      headers: { "content-type": "application/json" }
+    });
   } catch (err) {
-    console.error("GET /api/cron error:", err);
-    res.status(500).json({ error: "cron_failed", message: String(err) });
+    return new Response(JSON.stringify({ error: "cron_failed", message: String(err) }), {
+      status: 500, headers: { "content-type": "application/json" }
+    });
   }
 }
