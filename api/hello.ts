@@ -3,4 +3,3 @@ export default function handler(request: Request): Response {
     headers: { "content-type": "application/json" }
   });
 }
-
