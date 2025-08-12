@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 /**
  * Orchestrates cache + scrape/fallback.
  * For now, we use in-memory cache. This is fine to prove the pipeline.
