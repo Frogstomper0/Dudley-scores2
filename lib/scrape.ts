@@ -1,108 +1,230 @@
+// lib/scrape.ts
 // @ts-nocheck
 
 /**
  * Connects to Browserless via Playwright and returns normalized JSON:
  * { updated, club, season, upcoming[], results[] }
  *
- * NOTE: The parsing logic is a conservative stub that aims to be safe to deploy.
- * It demonstrates the connection, loads the club page and competition pages,
- * and returns an empty result set if selectors don't match. You can extend
- * the CSS selectors once we confirm the exact DOM structure for your comps.
+ * Conservative parser:
+ * - Loads club page, discovers competition links.
+ * - Visits a handful of competition pages.
+ * - Pulls text from likely "cards/rows" and heuristically extracts teams/scores/dates.
+ * - Minis/Mods (U6–U12) scores are omitted via minisModsNoScore().
+ * - Always closes browser/context; continues on per-page failures.
  */
+
 import { chromium } from "playwright-core";
-import { minisModsNoScore } from "./normalize.js";
+import { minisModsNoScore } from "./normalize";
 
 const ORIGIN = "https://www.playrugbyleague.com";
 
-export async function scrapeAll({ ws, clubSlug, seasonYear, timezone }) {
+// --- tiny helpers -----------------------------------------------------------
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function unique<T>(arr: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of arr) {
+    const key = typeof item === "string" ? item : JSON.stringify(item);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function parseTeams(text: string) {
+  // Match: "Dudley Redhead v South Newcastle" / "Dudley Redhead vs South Newcastle"
+  const m = text.match(/([\p{L}\p{N}&.'()\- ]{2,}?)\s+(?:vs|v)\s+([\p{L}\p{N}&.'()\- ]{2,})/iu);
+  if (!m) return null;
+  return { homeTeam: m[1].trim(), awayTeam: m[2].trim() };
+}
+
+function parseScorePair(text: string) {
+  // Match common score patterns like "12 - 18" or "12–18"
+  const m = text.match(/\b(\d{1,3})\s*[-–]\s*(\d{1,3})\b/);
+  if (!m) return null;
+  return { scoreHome: Number(m[1]), scoreAway: Number(m[2]) };
+}
+
+function looksFullTime(text: string) {
+  const t = text.toLowerCase();
+  return t.includes("full time") || t.includes("ft") || /\bft\b/i.test(text);
+}
+
+function normalizeIso(dateLike?: string | Date) {
+  try {
+    if (!dateLike) return new Date().toISOString();
+    if (typeof dateLike === "string") {
+      // Basic parse for formats like "Sat 10 Aug", "10/08/2025", etc.
+      // If parsing fails, default to now.
+      const parsed = Date.parse(dateLike);
+      if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+    } else if (dateLike instanceof Date && !Number.isNaN(dateLike.valueOf())) {
+      return dateLike.toISOString();
+    }
+  } catch {}
+  return new Date().toISOString();
+}
+
+function inferDateNearby(text: string) {
+  // Try pull something date-like from the text; if not found, return undefined
+  // e.g., "Sat 10 Aug 10:00 AM", "10/08/2025", "Aug 10"
+  const m =
+    text.match(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/) || // 10/08[/2025]
+    text.match(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b.*?\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*?\d{1,2}/i) ||
+    text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\.?\s+\d{1,2}(?:,\s*\d{4})?/i);
+  return m ? m[0] : undefined;
+}
+
+function isMinisModsGradeGuess(text: string) {
+  // Helps us mark scores as null if the grade indicates Minis/Mods U6–U12
+  return /\bu(?:6|7|8|9|10|11|12)\b/i.test(text) || /mini|mod/i.test(text);
+}
+
+// --- main scrape ------------------------------------------------------------
+
+export async function scrapeAll({
+  ws,
+  clubSlug,
+  seasonYear,
+  timezone,
+}: {
+  ws: string;
+  clubSlug: string;
+  seasonYear: number;
+  timezone?: string;
+}) {
+  // 1) Connect to the remote Chromium the recommended way (CDP).
+  //    Browserless documents this flow and Playwright exposes connectOverCDP.
+  //    (Refs: Playwright BrowserType.connectOverCDP; Browserless Playwright connect docs)
   const browser = await chromium.connectOverCDP(ws);
-  const context = await browser.newContext({ timezoneId: timezone || "Australia/Sydney" });
+  const context = await browser.newContext({
+    timezoneId: timezone || "Australia/Sydney",
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    // Keep it light; we don't need storage/state.
+  });
   const page = await context.newPage();
 
   const clubUrl = `${ORIGIN}/competitions/club/${clubSlug}`;
-  const upcoming = [];
-  const results = [];
+  const upcoming: any[] = [];
+  const results: any[] = [];
 
   try {
-    // 1) Open club page and attempt to find links to this season's competitions
-    await page.goto(clubUrl, { waitUntil: "domcontentloaded" });
-    // Wait for any links to render (SPA). Adjust selector later when we confirm exact markup.
-    await page.waitForTimeout(1500);
+    // 2) Open club page; let SPA render
+    await page.goto(clubUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await sleep(1500);
 
-    const compLinks = await page.$$eval("a[href*='/competitions/']", (as) => {
-      const seen = new Set();
-      return as
-        .map(a => a.href)
-        .filter(href => {
-          if (!href) return false;
-          if (!href.includes("/competitions/")) return false;
-          if (seen.has(href)) return false;
-          seen.add(href);
-          return true;
-        })
-        .slice(0, 8); // safety cap for first pass
+    // 3) Discover a handful of competition links (unique, same-origin)
+    const compLinks = await page.$$eval("a[href*='/competitions/']", (as: Element[]) => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const a of as) {
+        if (!(a instanceof HTMLAnchorElement)) continue;
+        const href = a.href;
+        if (!href) continue;
+        if (!href.includes("/competitions/")) continue;
+        if (!href.startsWith("http")) continue;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        out.push(href);
+        if (out.length >= 10) break; // safety cap
+      }
+      return out;
     });
 
-    // 2) Visit a few competition pages and try to parse visible items
-    for (const href of compLinks) {
+    // 4) Visit each competition page and extract fixtures/results heuristically
+    for (const href of unique(compLinks)) {
       try {
-        await page.goto(href, { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(1500);
+        await page.goto(href, { waitUntil: "domcontentloaded", timeout: 45_000 });
+        await sleep(1500);
 
-        // Try very generic extraction for “cards” or “rows” that include date/team/score text.
-        const items = await page.$$eval("*", (nodes) => {
-          // Grab text from reasonable item containers
-          return nodes
-            .filter(n => {
-              const name = n.tagName;
-              if (!name) return false;
-              // likely card/row containers
-              return ["LI","TR","ARTICLE","DIV"].includes(name);
-            })
-            .map(n => n.innerText.trim())
-            .filter(t => t && t.length > 20)
-            .slice(0, 50);
+        // Prefer big list-ish containers (LI/TR/ARTICLE/DIV)
+        const items: string[] = await page.$$eval("*", (nodes: Element[]) => {
+          const buf: string[] = [];
+          for (const n of nodes) {
+            const name = n.tagName;
+            if (!name) continue;
+            if (!["LI", "TR", "ARTICLE", "DIV"].includes(name)) continue;
+            const t = (n.textContent || "").replace(/\s+/g, " ").trim();
+            if (t && t.length > 25) buf.push(t);
+            if (buf.length >= 120) break; // safety cap
+          }
+          return buf;
         });
 
-        // Very light heuristic: split recent vs upcoming by keywords.
-        for (const t of items) {
-          const lower = t.toLowerCase();
-          const looksFT = lower.includes("full time") || lower.includes("ft");
-          const hasVs = lower.includes(" vs ") || lower.includes(" v ");
-          if (!hasVs) continue;
+        // Optional match-centre links (deep links) – handy for source attribution
+        const matchLinks: string[] = await page.$$eval("a[href*='/match-centre/']", (as: Element[]) =>
+          Array.from(as)
+            .filter((a): a is HTMLAnchorElement => a instanceof HTMLAnchorElement)
+            .map((a) => a.href)
+            .slice(0, 100),
+        );
 
-          if (looksFT) {
-            // rudimentary result object; real parser will map fields exactly
-            const obj = {
-              date: new Date().toISOString(),
-              grade: "Unknown Grade",
-              homeTeam: "Home",
-              awayTeam: "Away",
-              scoreHome: null,
-              scoreAway: null,
-              status: "FT",
-              source: href
+        // Extract a grade hint from the page (e.g., a heading)
+        const gradeHint =
+          (await page.title()).replace(/\s*\|\s*Play Rugby League.*/i, "").trim() ||
+          (await page.locator("h1,h2").first().textContent().catch(() => "")) ||
+          "Unknown Grade";
+
+        for (const raw of items) {
+          const text = raw.trim();
+          const teams = parseTeams(text);
+          if (!teams) continue;
+
+          const hasScore = parseScorePair(text);
+          const ft = looksFullTime(text);
+          const dateGuess = inferDateNearby(text);
+          const iso = normalizeIso(dateGuess);
+
+          if (ft || hasScore) {
+            // Completed result
+            const base = {
+              date: iso,
+              grade: gradeHint,
+              homeTeam: teams.homeTeam,
+              awayTeam: teams.awayTeam,
+              status: ft ? "FT" : "Result",
+              source: href,
+              matchUrl: matchLinks.find((m) => text.includes(m.split("/").pop() || "")) || href,
             };
-            results.push(minisModsNoScore(obj));
+
+            let obj: any = { ...base, scoreHome: null, scoreAway: null };
+            if (hasScore) obj = { ...obj, ...hasScore };
+
+            // Ensure Minis/Mods scores are omitted
+            const finalObj = isMinisModsGradeGuess(base.grade)
+              ? minisModsNoScore({ ...obj, grade: base.grade })
+              : obj;
+
+            results.push(finalObj);
           } else {
-            const obj = {
-              date: new Date(Date.now() + 3*24*60*60*1000).toISOString(),
-              grade: "Unknown Grade",
-              homeTeam: "Home",
-              awayTeam: "Away",
-              venue: "TBC",
-              source: href
+            // Upcoming fixture
+            const fixture = {
+              date: iso || normalizeIso(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)),
+              grade: gradeHint,
+              homeTeam: teams.homeTeam,
+              awayTeam: teams.awayTeam,
+              venue: /field|oval|park|ground|stadium/i.test(text) ? text : "TBC",
+              source: href,
             };
-            upcoming.push(obj);
+            upcoming.push(fixture);
           }
         }
       } catch (err) {
-        console.warn("comp parse issue:", href, err);
+        console.warn("competition parse issue:", href, String(err));
       }
     }
   } finally {
-    await context.close();
-    await browser.close();
+    try {
+      await context.close();
+    } catch {}
+    try {
+      await browser.close();
+    } catch {}
   }
 
   const updated = new Date().toISOString();
@@ -110,7 +232,8 @@ export async function scrapeAll({ ws, clubSlug, seasonYear, timezone }) {
     updated,
     club: "Dudley Redhead JRLFC",
     season: Number(seasonYear || 2025),
-    upcoming,
-    results
+    upcoming: unique(upcoming).slice(0, 200),
+    results: unique(results).slice(0, 200),
   };
 }
+
