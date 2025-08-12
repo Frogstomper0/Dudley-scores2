@@ -6,7 +6,7 @@ This repo serves `/games.json` for your website. It supports two modes:
 
 1. **Fallback/Dummy mode** (no Browserless token): returns sample `upcoming` and `results`.
 2. **Live scraping mode** (with `BROWSERLESS_WS` env var): uses Playwright to connect to Browserless and scrape Play Rugby League pages (SPA).
-
+ f
 ## Env Vars (Vercel → Project → Settings → Environment Variables)
 
 - `SEASON_YEAR` = `2025`
