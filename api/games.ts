@@ -1,17 +1,14 @@
-/**
- * /api/games – returns the current games JSON.
- * - If cache is fresh, returns it.
- * - If empty or stale, will try to refresh (scrape if BROWSERLESS_WS is set; otherwise fallback).
- */
-import { getGamesJson } from "../lib/data.js";
+import { getGamesJson } from "../lib/data";
 
-export default async function handler(req, res) {
+export default async function handler(request: Request): Promise<Response> {
   try {
     const data = await getGamesJson({ preferFresh: false });
-    res.setHeader("content-type", "application/json");
-    res.status(200).send(JSON.stringify(data, null, 2));
+    return new Response(JSON.stringify(data, null, 2), {
+      headers: { "content-type": "application/json" }
+    });
   } catch (err) {
-    console.error("GET /api/games error:", err);
-    res.status(500).json({ error: "games_failed", message: String(err) });
+    return new Response(JSON.stringify({ error: "games_failed", message: String(err) }), {
+      status: 500, headers: { "content-type": "application/json" }
+    });
   }
 }
