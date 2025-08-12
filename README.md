@@ -1,4 +1,4 @@
-#EDIT
+#EDIT herew anotherh 
 # Dudley Scores – Vercel + Browserless
 
 This repo serves `/games.json` for your website. It supports two modes:
