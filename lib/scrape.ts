@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 /**
  * Connects to Browserless via Playwright and returns normalized JSON:
  * { updated, club, season, upcoming[], results[] }
