@@ -1,4 +1,5 @@
 ﻿{
+  // VS Code: To avoid schema loading errors, you can disable JSON validation for this file in your settings.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",

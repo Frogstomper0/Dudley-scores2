@@ -12,7 +12,7 @@
  * - Minis/Mods (U6–U12) scores are omitted via minisModsNoScore().
  * - Always closes browser/context; continues on per-page failures.
  */
-
+import { scrapeAll } from "../lib/scrape";
 import { chromium } from "playwright-core";
 import { minisModsNoScore } from "./normalize";
 
