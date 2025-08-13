@@ -1,4 +1,4 @@
-{
+﻿{
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -9,6 +9,5 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": ["api/**/*.ts", "lib/**/*.ts"]
 }
-
