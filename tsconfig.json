@@ -11,10 +11,4 @@
   },
   "include": ["**/*.ts", "**/*.tsx"]
 }
-// tsconfig.json
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": { "@/*": ["./*"] }
-  }
-}
+
