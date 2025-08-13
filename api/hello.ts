@@ -1,5 +1,6 @@
-export default function handler(request: Request): Response {
-  return new Response(JSON.stringify({ ok: true }), {
-    headers: { "content-type": "application/json" }
-  });
+// api/hello.ts
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get('name') ?? 'World';
+  return Response.json({ message: `Hello ${name}!` });
 }
