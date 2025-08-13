@@ -1,5 +1,5 @@
 // api/cron.ts
-import { scrapeAll } from "@/lib/scrape";
+import { scrapeAll } from "../lib/scrape";
 
 export async function GET(req: Request) {
   // Optional: verify it's Vercel Cron hitting you
